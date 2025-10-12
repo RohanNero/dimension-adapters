@@ -2,10 +2,13 @@ import { SimpleAdapter, FetchOptions } from "../../adapters/types"
 import { CHAIN } from "../../helpers/chains"
 
 const feeChargedABI = "event FeeCharged (uint256 fee)";
-const kumaSwapSetABI = "event KUMASwapSet (address KUMASwap, bytes4 indexed currency, bytes32 indexed issuer, uint64 indexed term)"
-const getRiskCategoryABI = "function getRiskCategory() external view returns (bytes32)"
-const getKIBTokenABI = "function getKIBToken(bytes32 riskCategory) external view returns (address)"
-
+const kumaSwapSetABI = "event KUMASwapSet (address KUMASwap, bytes4 indexed currency, bytes32 indexed issuer, uint64 indexed term)";
+const getRiskCategoryABI = "function getRiskCategory() external view returns (bytes32)";
+const getKIBTokenABI = "function getKIBToken(bytes32 riskCategory) external view returns (address)";
+const getRateFeedABI = "function getRateFeed() external view returns (address)";
+const getOracleABI = "function getOracle(bytes32 riskCategory) external view returns (address)";
+const latestRoundDataABI = "function latestRoundData() external view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)";
+const decimalsABI = "function decimals() external pure returns (uint8)";
 
 const fetch = (addressProvider: string, creationBlock: number) => {
     return async (options: FetchOptions) => {
@@ -20,16 +23,20 @@ const fetch = (addressProvider: string, creationBlock: number) => {
         })
 
         const swapContracts = swapSetLogs.map((log) => log.KUMASwap);
+        if (swapContracts.length === 0) return { dailyFees, dailyRevenue: dailyFees };
 
+        const rateFeed = await options.api.call({
+            target: addressProvider,
+            abi: getRateFeedABI
+        })
 
         for (const contract of swapContracts) {
             const feeLogs = await options.getLogs({
                 target: contract,
                 eventAbi: feeChargedABI,
-                onlyArgs: true,
+                entireLog: true
             })
             if (feeLogs.length == 0) continue;
-
 
             const riskCategory = await options.api.call({
                 target: contract,
@@ -42,15 +49,32 @@ const fetch = (addressProvider: string, creationBlock: number) => {
                 params: [riskCategory],
             })
 
-            feeLogs.forEach((log) => {
-                if (!log.fee || log.fee == 0) return;
-                dailyFees.add(currency, log.fee)
+            const oracleAddress = await options.api.call({
+                target: rateFeed,
+                abi: getOracleABI,
+                params: [riskCategory],
             })
+
+            const decimals = await options.api.call({
+                target: oracleAddress,
+                abi: decimalsABI,
+            })
+
+            for (const log of feeLogs) {
+                if (!log.args.fee || log.args.fee == 0) continue;
+                const priceData = await options.api.call({
+                    target: oracleAddress,
+                    abi: latestRoundDataABI,
+                    block: log.blockNumber
+                })
+                const price = Number(priceData.answer) / (1 * 10 ** decimals);
+                const feeInUSD = Number(log.args.fee) * price / 1e18;
+                dailyFees.addUSDValue(feeInUSD);
+            }
         }
         return { dailyFees, dailyRevenue: dailyFees }
     }
 }
-
 
 const adapter: SimpleAdapter = {
     version: 2,
