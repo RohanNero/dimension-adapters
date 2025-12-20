@@ -1,95 +1,71 @@
 import { METRIC } from "../../helpers/metrics";
-import { Adapter, BaseAdapterChainConfig, FetchOptions, FetchResultV2 } from "../../adapters/types";
-import { InfraConfigs } from "./config";
+import { lagoonExports } from "../../helpers/lagoon";
+import { CHAIN } from "../../helpers/chains";
 
 // docs: https://docs.lagoon.finance/vault/fees
 // Lagoon allows curators to deploy vaults - where users can deposit and earn yields
 // curators can config and share of yield from performance and management fees
 // on top of that, Lagoon can earn up to 30% of those fees as protocol revenue 
-
-const Abis = {
-  ProxyDeployedEvent: 'event ProxyDeployed(address proxy, address deployer)',
-  convertToAssets: 'function convertToAssets(uint256) view returns (uint256)',
-  feeRates: 'function feeRates() view returns (uint256 managementRate, uint256 performanceRate)',
-  getRolesStorage: 'function getRolesStorage() view returns (address whitelistManager,address feeReceiver,address safe,address feeRegistry,address valuationManager)',
-  protocolRate: 'function protocolRate(address vault) view returns (uint256 rate)',
-}
-
-async function fetch(options: FetchOptions): Promise<FetchResultV2> {
-  const dailyFees = options.createBalances()
-  const dailyRevenue = options.createBalances()
-  const dailyProtocolRevenue = options.createBalances()
-  const dailySupplySideRevenue = options.createBalances()
-
-  let vaults: Array<string> = InfraConfigs[options.chain].vaults;
-  for (const factory of InfraConfigs[options.chain].factories) {
-    const events = await options.getLogs({
-      eventAbi: Abis.ProxyDeployedEvent,
-      target: factory.address,
-      fromBlock: factory.fromBlock,
-    });
-    vaults = vaults.concat(events.map((e: any) => e.proxy))
-  }
-  if (vaults.length === 0) return { dailyFees, dailyRevenue, dailySupplySideRevenue, dailyProtocolRevenue };
-
-  const protocolRates = await options.api.multiCall({
-    abi: Abis.protocolRate,
-    calls: vaults.map(vault => ({ target: InfraConfigs[options.chain].feeRegistry, params: [vault] })),
-    permitFailure: true
-  })
-  const assets = await options.api.multiCall({ abi: 'address:asset', calls: vaults, permitFailure: true })
-  const balances = await options.api.multiCall({ abi: 'uint256:totalAssets', calls: vaults, permitFailure: true })
-  const feeRates = await options.api.multiCall({ abi: Abis.feeRates, calls: vaults, permitFailure: true })
-  const convertCalls = vaults.map((vault: string) => {
-    return {
-      target: vault,
-      params: [String(1e18)],
-    }
-  })
-  const cumulativeIndexBefore = await options.fromApi.multiCall({ abi: Abis.convertToAssets, calls: convertCalls, permitFailure: true, })
-  const cumulativeIndexAfter = await options.toApi.multiCall({ abi: Abis.convertToAssets, calls: convertCalls, permitFailure: true, })
-
-  for (let i = 0; i < vaults.length; i++) {
-    if (assets[i] && balances[i] && cumulativeIndexBefore[i] && cumulativeIndexAfter[i]) {
-      const cumulativeYield = (BigInt(cumulativeIndexAfter[i]) - BigInt(cumulativeIndexBefore[i])) * BigInt(balances[i]) / BigInt(1e18)
-
-      const managementFeeRate = Number(feeRates[i] ? Number(feeRates[i].managementRate) / 1e4 : 0)
-      const performanceFeeRate = Number(feeRates[i] ? Number(feeRates[i].performanceRate) / 1e4 : 0)
-      const protocolFeeRate = Number(protocolRates[i] ? Number(protocolRates[i]) / 1e4 : 0)
-
-      const performanceFees = Number(cumulativeYield) * performanceFeeRate
-
-      const oneYear = 365 * 24 * 3600
-      const timeframe = options.toTimestamp - options.fromTimestamp
-      const managementFees = Number(balances[i]) * Number(managementFeeRate) * timeframe / oneYear
-
-      const supplySideYields = Number(cumulativeYield) - performanceFees
-
-      dailyFees.add(assets[i], supplySideYields, METRIC.ASSETS_YIELDS);
-      dailyFees.add(assets[i], performanceFees, METRIC.PERFORMANCE_FEES);
-      dailyFees.add(assets[i], managementFees, METRIC.MANAGEMENT_FEES);
-
-      dailySupplySideRevenue.add(assets[i], supplySideYields, METRIC.ASSETS_YIELDS);
-
-      dailyRevenue.add(assets[i], performanceFees, METRIC.PERFORMANCE_FEES);
-      dailyRevenue.add(assets[i], managementFees, METRIC.MANAGEMENT_FEES);
-
-      dailyProtocolRevenue.add(assets[i], Number(performanceFees) * protocolFeeRate, METRIC.PERFORMANCE_FEES);
-      dailyProtocolRevenue.add(assets[i], Number(managementFees) * protocolFeeRate, METRIC.MANAGEMENT_FEES);
-    }
-  }
-
-  return {
-    dailyFees,
-    dailyRevenue,
-    dailySupplySideRevenue,
-    dailyProtocolRevenue,
-  }
-}
-
-const adapter: Adapter = {
-  version: 2,
-  adapter: {},
+export default {
+  ...lagoonExports({
+    [CHAIN.ETHEREUM]: {
+      feeRegistry: '0x6dA4D1859bA1d02D095D2246142CdAd52233e27C',
+      factories: [
+        { address: '0x8D6f5479B14348186faE9BC7E636e947c260f9B1', fromBlock: 22940919 }, // optinProxyFactory
+        { address: '0x09C8803f7Dc251f9FaAE5f56E3B91f8A6d0b70ee', fromBlock: 22218451 }, // beaconFactory
+      ],
+      vaults: [
+        '0x07ed467acD4ffd13023046968b0859781cb90D9B', // 9Summits Flagship ETH
+        '0x03D1eC0D01b659b89a87eAbb56e4AF5Cb6e14BFc', // 9Summits Flagship USDC
+        '0xB09F761Cb13baCa8eC087Ac476647361b6314F98', // 9Summits & Tulipa Capital cbBTC
+        '0x8092cA384D44260ea4feaf7457B629B8DC6f88F0', // Usual Invested USD0++ in stUSR
+        '0x66dCB62da5430D800a1c807822C25be17138fDA8', // Unity Trust
+        '0x71652D4898DE9A7DD35e472a5fe4577eC69d82f2', // Trinity Trust
+        '0x7895a046b26cc07272b022a0c9bafc046e6f6396', // Noon tacUSN
+        '0x8245FD9Ae99A482dFe76576dd4298f799c041D61', // Usual Invested USD0++ in USCC & USTB
+        '0xaf87b90e8a3035905697e07bb813d2d59d2b0951', // Usual Invested USD0++ in TAC
+      ],
+    },
+    [CHAIN.ARBITRUM]: {
+      feeRegistry: '0x6dA4D1859bA1d02D095D2246142CdAd52233e27C',
+      factories: [
+        { address: '0x9De724B0efEe0FbA07FE21a16B9Bf9bBb5204Fb4', fromBlock: 358686643 },
+        { address: '0x58a7729125acA9e5E9C687018E66bfDd5b2D4490', fromBlock: 324144504 },
+      ],
+      vaults: ['0x99CD0b8b32B15922f0754Fddc21323b5278c5261'],
+    },
+    [CHAIN.AVAX]: {
+      feeRegistry: '0xD7F69ba99c6981Eab5579Aa16871Ae94c509d578',
+      factories: [
+        { address: '0xC094C224ce0406BC338E00837B96aD2e265F7287', fromBlock: 65620725 },
+        { address: '0x5E231C6D030a5c0f51Fa7D0F891d3f50A928C685', fromBlock: 62519141 },
+      ],
+    },
+    [CHAIN.BASE]: {
+      feeRegistry: '0x6dA4D1859bA1d02D095D2246142CdAd52233e27C',
+      factories: [
+        { address: '0x6FC0F2320483fa03FBFdF626DDbAE2CC4B112b51', fromBlock: 32988756 },
+        { address: '0xC953Fd298FdfA8Ed0D38ee73772D3e21Bf19c61b', fromBlock: 29100401 },
+      ],
+      vaults: [
+        "0xFCE2064B4221C54651B21c868064a23695E78f09", // 722Capital-ETH
+        "0x8092cA384D44260ea4feaf7457B629B8DC6f88F0", // DeTrade Core USDC
+        "0xB09F761Cb13baCa8eC087Ac476647361b6314F98", // 722Capital-USDC
+      ],
+    },
+    [CHAIN.LINEA]: {
+      feeRegistry: '0xC81Dd51239119Db80D5a6E1B7347F3C3BC8674d9',
+      factories: [
+        { address: '0x8D6f5479B14348186faE9BC7E636e947c260f9B1', fromBlock: 23119208 },
+      ],
+    },
+    [CHAIN.MONAD]: {
+      feeRegistry: '0xBf994c358f939011595AB4216AC005147863f9D6',
+      factories: [
+        { address: '0xcCdC4d06cA12A29C47D5d105fED59a6D07E9cf70', fromBlock: 36249718 },
+      ],
+    },
+  }),
   methodology: {
     Fees: 'Total yield generated from supplied assets.',
     Revenue: 'Amount of performance and management fees to vault deployers and Lagoon protocol.',
@@ -115,12 +91,3 @@ const adapter: Adapter = {
     },
   }
 };
-
-for (const [chain, config] of Object.entries(InfraConfigs)) {
-  (adapter.adapter as BaseAdapterChainConfig)[chain] = {
-    fetch,
-    start: config.start,
-  }
-}
-
-export default adapter;
